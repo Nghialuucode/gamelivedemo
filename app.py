@@ -15,7 +15,7 @@ try:
     import nest_asyncio
     nest_asyncio.apply()
 except ImportError:
-    pass  # Nếu thiếu nest_asyncio, vẫn còn fallback dùng thread riêng
+    pass
 
 
 # --- Cấu hình trang ---
@@ -92,7 +92,6 @@ for key, default in [
     ("audio_bytes", None),
     ("last_audio_text", ""),
     ("audio_unlocked", False),
-    ("audio_seq", 0),       # Tăng mỗi lần có audio mới → widget re-mount
     ("test_audio_bytes", None),
 ]:
     if key not in st.session_state:
@@ -211,9 +210,7 @@ def drain_queue():
                             text_to_say, selected_voice
                         )
                         st.session_state.last_audio_text = text_to_say
-                        st.session_state.audio_seq += 1  # Force widget re-mount
                     except Exception as e:
-                        # In traceback ra terminal để thấy trong log Streamlit Cloud
                         traceback.print_exc(file=sys.stderr)
                         st.error(f"Lỗi tạo giọng nói: {e}")
         except queue.Empty:
@@ -284,15 +281,13 @@ with col_stage:
             else:
                 avatar_placeholder.info("Avatar người tặng quà sẽ xuất hiện ở đây.")
 
-    # --- Phát âm thanh ---
+    # --- Phát âm thanh (đã sửa: bỏ tham số key) ---
     st.subheader("🔊 Giọng đọc AI")
     if st.session_state.audio_bytes:
-        # key thay đổi mỗi lần có audio mới → trình duyệt re-trigger autoplay
         st.audio(
             st.session_state.audio_bytes,
             format="audio/mp3",
-            autoplay=True,
-            key=f"audio_player_{st.session_state.audio_seq}"
+            autoplay=True
         )
         st.caption(f"Nội dung: _{st.session_state.last_audio_text}_")
     else:
