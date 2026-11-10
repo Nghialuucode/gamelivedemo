@@ -3,3 +3,7 @@ streamlit-autorefresh
 TikTokLive
 edge-tts
 nest-asyncio
+streamlit-TTS
+opencv-python-headless
+numpy
+Pillow
