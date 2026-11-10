@@ -8,7 +8,8 @@ from TikTokLive.events import GiftEvent, ConnectEvent, DisconnectEvent
 
 logger = logging.getLogger(__name__)
 
-def create_beautiful_art(image_bytes: bytes) -> bytes:
+def create_comic_art(image_bytes: bytes) -> bytes:
+    """Nâng cấp ảnh cực nét bằng thuật toán Detail Enhance (Phong cách Comic)."""
     if not image_bytes:
         return None
     try:
@@ -17,20 +18,18 @@ def create_beautiful_art(image_bytes: bytes) -> bytes:
         if img is None:
             return None
 
-        # 1. Phóng to ảnh bằng AI nội suy (Lanczos) để chống vỡ hạt
+        # 1. Phóng to ảnh 4 lần để bù đắp độ phân giải thấp
         h, w = img.shape[:2]
-        if w < 800:
-            img = cv2.resize(img, (w * 4, h * 4), interpolation=cv2.INTER_LANCZOS4)
+        img = cv2.resize(img, (w * 4, h * 4), interpolation=cv2.INTER_LANCZOS4)
 
-        # 2. Dùng bộ lọc Stylization (tranh vẽ màu) thay vì bút chì đen trắng
-        # sigma_s: độ mịn, sigma_r: độ tương phản màu
-        art_img = cv2.stylization(img, sigma_s=60, sigma_r=0.07)
+        # 2. Dùng Detail Enhance để làm nét các đường viền và màu sắc
+        comic_img = cv2.detailEnhance(img, sigma_s=10, sigma_r=0.15)
 
         # 3. Mã hóa lại thành PNG
-        _, buffer = cv2.imencode('.png', art_img)
+        _, buffer = cv2.imencode('.png', comic_img)
         return buffer.tobytes()
     except Exception as e:
-        logger.error(f"Lỗi tạo tranh: {e}")
+        logger.error(f"Lỗi tạo ảnh: {e}")
         return None
 
 class TikTokLiveScraper:
@@ -52,7 +51,7 @@ class TikTokLiveScraper:
             user_name = event.user.nickname
             gift_name = event.gift.name if event.gift else "Quà"
 
-            # Bỏ qua nếu đang trong chuỗi streak (chờ kết thúc mới hiện)
+            # Bỏ qua nếu đang trong chuỗi streak
             if event.gift and getattr(event.gift, "streakable", False) and getattr(event, "streaking", False):
                 return
             count = getattr(event, "repeat_count", 1) or 1
@@ -60,6 +59,7 @@ class TikTokLiveScraper:
             art_bytes = None
             try:
                 best_avatar = None
+                # Ưu tiên ảnh lớn nhất có thể
                 for attr in ("avatar_large", "avatar_medium", "avatar_thumb"):
                     av = getattr(event.user, attr, None)
                     if av and getattr(av, "url_list", None):
@@ -69,7 +69,7 @@ class TikTokLiveScraper:
                 if best_avatar:
                     original_bytes = await self.client.web.fetch_image_data(image=best_avatar)
                     if original_bytes:
-                        art_bytes = create_beautiful_art(original_bytes)
+                        art_bytes = create_comic_art(original_bytes)
             except Exception as e:
                 logger.error(e)
 
