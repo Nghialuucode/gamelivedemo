@@ -1,15 +1,49 @@
 import queue
 import threading
 import logging
+import cv2
+import numpy as np
 from TikTokLive import TikTokLiveClient
 from TikTokLive.client.web.web_settings import WebDefaults
 from TikTokLive.events import CommentEvent, GiftEvent, ConnectEvent, DisconnectEvent
 
 logger = logging.getLogger(__name__)
 
-# API Key được cấu hình qua biến môi trường SIGN_API_KEY (Streamlit Cloud)
-# hoặc gán trực tiếp dòng dưới nếu chạy local:
 # WebDefaults.tiktok_sign_api_key = "YOUR_EULER_API_KEY_HERE"
+
+
+def create_artistic_sketch(image_bytes: bytes) -> bytes:
+    """
+    Chuyển đổi ảnh avatar thành một bức ký họa nghệ thuật bằng OpenCV.
+    """
+    if not image_bytes:
+        return None
+    try:
+        # 1. Chuyển bytes thành mảng numpy và giải mã ảnh
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            raise ValueError("Không thể giải mã ảnh từ bytes.")
+
+        # 2. Tạo hiệu ứng sketch
+        # Chuyển sang ảnh xám
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        # Đảo ngược màu ảnh xám
+        inverted_gray = 255 - gray
+        # Làm mờ ảnh đảo ngược bằng Gaussian Blur
+        blurred = cv2.GaussianBlur(inverted_gray, (21, 21), 0)
+        # Đảo ngược ảnh đã làm mờ
+        inverted_blurred = 255 - blurred
+        # Tạo hiệu ứng sketch bằng cách chia ảnh xám cho ảnh đảo ngược đã làm mờ
+        # Sử dụng cv2.divide để tránh chia cho 0
+        sketch = cv2.divide(gray, inverted_blurred, scale=256.0)
+
+        # 3. Mã hóa ảnh sketch trở lại thành bytes (định dạng PNG)
+        _, buffer = cv2.imencode('.png', sketch)
+        return buffer.tobytes()
+    except Exception as e:
+        logger.error(f"Lỗi khi tạo hiệu ứng sketch: {e}")
+        return None
 
 
 class TikTokLiveScraper:
@@ -45,7 +79,6 @@ class TikTokLiveScraper:
             user_name = event.user.nickname
             gift_name = event.gift.name if event.gift else "Quà tặng"
 
-            # Xử lý streak: chỉ gửi khi streak kết thúc
             if event.gift and getattr(event.gift, "streakable", False):
                 if getattr(event, "streaking", False):
                     return
@@ -53,14 +86,14 @@ class TikTokLiveScraper:
             else:
                 count = 1
 
-            # --- TẢI AVATAR CHẤT LƯỢNG CAO NHẤT CÓ SẴN ---
-            avatar_bytes = None
+            # --- TẢI VÀ VẼ LẠI AVATAR ---
+            avatar_original_bytes = None
+            avatar_sketch_bytes = None
             avatar_error = None
             user = event.user
 
             try:
                 best_avatar = None
-                # Ưu tiên: large > medium > thumb
                 for attr in ("avatar_large", "avatar_medium", "avatar_thumb"):
                     av = getattr(user, attr, None)
                     if av is not None and getattr(av, "url_list", None):
@@ -70,12 +103,18 @@ class TikTokLiveScraper:
                 if best_avatar is None:
                     avatar_error = "Người dùng không có avatar hợp lệ."
                 else:
-                    avatar_bytes = await self.client.web.fetch_image_data(image=best_avatar)
-                    if avatar_bytes is None:
+                    avatar_original_bytes = await self.client.web.fetch_image_data(image=best_avatar)
+                    if avatar_original_bytes is None:
                         avatar_error = "fetch_image_data trả về None."
+                    else:
+                        # Tạo hiệu ứng sketch từ ảnh gốc
+                        avatar_sketch_bytes = create_artistic_sketch(avatar_original_bytes)
+                        if avatar_sketch_bytes is None:
+                            avatar_error = "Không thể tạo hiệu ứng sketch."
+
             except Exception as e:
-                avatar_error = f"Lỗi tải ảnh: {e}"
-                logger.warning(f"Không thể tải avatar cho {user_name}: {e}")
+                avatar_error = f"Lỗi tải/xử lý ảnh: {e}"
+                logger.warning(f"Không thể xử lý avatar cho {user_name}: {e}")
 
             self.data_queue.put({
                 "type": "gift",
@@ -83,7 +122,8 @@ class TikTokLiveScraper:
                 "user_id": getattr(user, "unique_id", "unknown"),
                 "gift_name": gift_name,
                 "count": count,
-                "avatar_bytes": avatar_bytes,
+                "avatar_original_bytes": avatar_original_bytes, # Giữ lại ảnh gốc nếu cần
+                "avatar_sketch_bytes": avatar_sketch_bytes,     # Ảnh đã vẽ lại
                 "avatar_error": avatar_error
             })
 
