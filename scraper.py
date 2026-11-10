@@ -4,15 +4,11 @@ import logging
 import cv2
 import numpy as np
 from TikTokLive import TikTokLiveClient
-from TikTokLive.client.web.web_settings import WebDefaults
-from TikTokLive.events import CommentEvent, GiftEvent, ConnectEvent, DisconnectEvent
+from TikTokLive.events import GiftEvent, ConnectEvent, DisconnectEvent
 
 logger = logging.getLogger(__name__)
 
-# WebDefaults.tiktok_sign_api_key = "YOUR_EULER_API_KEY_HERE"
-
-def create_beautiful_sketch(image_bytes: bytes) -> bytes:
-    """Nâng cấp chất lượng ảnh và tạo hiệu ứng ký họa mềm mại."""
+def create_beautiful_art(image_bytes: bytes) -> bytes:
     if not image_bytes:
         return None
     try:
@@ -21,26 +17,20 @@ def create_beautiful_sketch(image_bytes: bytes) -> bytes:
         if img is None:
             return None
 
-        # 1. Upscale ảnh lên gấp 3 lần để chống vỡ hạt (nếu ảnh gốc nhỏ)
+        # 1. Phóng to ảnh bằng AI nội suy (Lanczos) để chống vỡ hạt
         h, w = img.shape[:2]
-        if w < 500:
-            img = cv2.resize(img, (w * 3, h * 3), interpolation=cv2.INTER_LANCZOS4)
+        if w < 800:
+            img = cv2.resize(img, (w * 4, h * 4), interpolation=cv2.INTER_LANCZOS4)
 
-        # 2. Dùng thuật toán pencilSketch tích hợp sẵn của OpenCV (mịn hơn nhiều)
-        # dst_gray là ảnh trắng đen nét vẽ chì, dst_color là ảnh màu
-        dst_gray, dst_color = cv2.pencilSketch(
-            img, sigma_s=60, sigma_r=0.07, shade_factor=0.05
-        )
-        
-        # Bạn có thể chọn trả về dst_gray (đen trắng) hoặc dst_color (có màu)
-        # Ở đây mình chọn ảnh đen trắng vì nó giống tranh vẽ nhất
-        final_img = dst_gray 
+        # 2. Dùng bộ lọc Stylization (tranh vẽ màu) thay vì bút chì đen trắng
+        # sigma_s: độ mịn, sigma_r: độ tương phản màu
+        art_img = cv2.stylization(img, sigma_s=60, sigma_r=0.07)
 
         # 3. Mã hóa lại thành PNG
-        _, buffer = cv2.imencode('.png', final_img)
+        _, buffer = cv2.imencode('.png', art_img)
         return buffer.tobytes()
     except Exception as e:
-        logger.error(f"Lỗi tạo sketch: {e}")
+        logger.error(f"Lỗi tạo tranh: {e}")
         return None
 
 class TikTokLiveScraper:
@@ -54,70 +44,57 @@ class TikTokLiveScraper:
     def _register_handlers(self):
         @self.client.on(ConnectEvent)
         async def on_connect(event: ConnectEvent):
-            self.data_queue.put({"type": "system", "message": f"✅ Đã kết nối @{event.unique_id}"})
-
-        @self.client.on(CommentEvent)
-        async def on_comment(event: CommentEvent):
-            user_name = event.user.nickname if event.user else "Ẩn danh"
-            self.data_queue.put({"type": "comment", "user": user_name, "text": event.comment or ""})
+            self.data_queue.put({"type": "system", "message": "Đã kết nối"})
 
         @self.client.on(GiftEvent)
         async def on_gift(event: GiftEvent):
-            if not event.user:
-                return
-
+            if not event.user: return
             user_name = event.user.nickname
-            gift_name = event.gift.name if event.gift else "Quà tặng"
+            gift_name = event.gift.name if event.gift else "Quà"
 
-            if event.gift and getattr(event.gift, "streakable", False):
-                if getattr(event, "streaking", False):
-                    return
-                count = getattr(event, "repeat_count", 1) or 1
-            else:
-                count = 1
+            # Bỏ qua nếu đang trong chuỗi streak (chờ kết thúc mới hiện)
+            if event.gift and getattr(event.gift, "streakable", False) and getattr(event, "streaking", False):
+                return
+            count = getattr(event, "repeat_count", 1) or 1
 
-            avatar_sketch_bytes = None
-            avatar_error = None
-            user = event.user
-
+            art_bytes = None
             try:
                 best_avatar = None
                 for attr in ("avatar_large", "avatar_medium", "avatar_thumb"):
-                    av = getattr(user, attr, None)
-                    if av is not None and getattr(av, "url_list", None):
+                    av = getattr(event.user, attr, None)
+                    if av and getattr(av, "url_list", None):
                         best_avatar = av
                         break
-
+                
                 if best_avatar:
                     original_bytes = await self.client.web.fetch_image_data(image=best_avatar)
                     if original_bytes:
-                        avatar_sketch_bytes = create_beautiful_sketch(original_bytes)
+                        art_bytes = create_beautiful_art(original_bytes)
             except Exception as e:
-                avatar_error = str(e)
+                logger.error(e)
 
             self.data_queue.put({
                 "type": "gift",
                 "user": user_name,
                 "gift_name": gift_name,
                 "count": count,
-                "avatar_sketch_bytes": avatar_sketch_bytes,
-                "avatar_error": avatar_error
+                "art_bytes": art_bytes
             })
 
         @self.client.on(DisconnectEvent)
         async def on_disconnect(event: DisconnectEvent):
-            self.data_queue.put({"type": "system", "message": "⚠️ Đã ngắt kết nối."})
+            self.data_queue.put({"type": "system", "message": "Đã ngắt kết nối"})
 
     def _run(self):
         try:
             self.client.run()
         except Exception as e:
-            self.data_queue.put({"type": "system", "message": f"❌ Lỗi: {e}"})
+            self.data_queue.put({"type": "system", "message": f"Lỗi: {e}"})
 
     def start(self):
         if self._thread is None or not self._thread.is_alive():
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
-
+            
     def stop(self):
         pass
