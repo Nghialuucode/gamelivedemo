@@ -17,14 +17,23 @@ def create_square_art(image_bytes: bytes) -> bytes:
         if img is None:
             return None
 
-        # 1. Cắt ảnh thành hình vuông (Center Crop) để đưa vào bàn cờ cho đẹp
         h, w = img.shape[:2]
+
+        # BỘ LỌC 1: Nếu ảnh quá nhỏ (dưới 50px) => Đây là ảnh mặc định của TikTok, bỏ qua
+        if w < 50 or h < 50:
+            return None
+
+        # BỘ LỌC 2: Phát hiện ảnh xám mặc định của TikTok (thường rất ít điểm ảnh hoặc trùng màu)
+        if np.std(img) < 10: # Độ lệch chuẩn màu thấp => ảnh đơn sắc
+            return None
+
+        # 1. Cắt ảnh vuông (Center Crop)
         min_dim = min(h, w)
         top = (h - min_dim) // 2
         left = (w - min_dim) // 2
         img = img[top:top+min_dim, left:left+min_dim]
 
-        # 2. Phóng to ảnh lên 400x400 (Chống vỡ hình)
+        # 2. Phóng to lên 400x400 (Chống vỡ hình)
         img = cv2.resize(img, (400, 400), interpolation=cv2.INTER_LANCZOS4)
 
         # 3. Dùng bộ lọc Stylization tạo hiệu ứng tranh vẽ Anime
@@ -56,7 +65,7 @@ class TikTokLiveScraper:
             user_name = event.user.nickname
             gift_name = event.gift.name if event.gift else "Quà"
 
-            # Bỏ qua nếu đang trong chuỗi streak
+            # Bỏ qua nếu đang trong chuỗi streak (chỉ hiện khi kết thúc)
             if event.gift and getattr(event.gift, "streakable", False) and getattr(event, "streaking", False):
                 return
             count = getattr(event, "repeat_count", 1) or 1
