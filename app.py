@@ -1,332 +1,174 @@
 import queue
-import asyncio
-import tempfile
-import os
-import sys
-import traceback
-import threading
-import uuid
-import base64
 import streamlit as st
 import streamlit.components.v1 as components
 from streamlit_autorefresh import st_autorefresh
-import edge_tts
 from scraper import TikTokLiveScraper
 
-# --- FIX ASYNCIO cho Streamlit ---
-try:
-    import nest_asyncio
-    nest_asyncio.apply()
-except ImportError:
-    pass
+# --- CẤU HÌNH TRANG ---
+st.set_page_config(page_title="Live Art Stage", page_icon="🎨", layout="wide")
 
-
-# --- Cấu hình trang ---
-st.set_page_config(page_title="TikTok Live Art Stage", page_icon="🎨", layout="wide")
-
+# --- CSS LÀM GIAO DIỆN TRONG SUỐT, ĐẸP, DÀNH CHO OBS ---
 st.markdown("""
 <style>
-    .stAppViewBlockContainer { padding-top: 0rem; }
-    header.stAppHeader { background-color: transparent; }
-    section.stMain .block-container { padding-top: 0.5rem; }
-    .sketch-frame {
-        border: 3px solid #FF4B4B;
+    /* Ẩn toàn bộ thanh công cụ Streamlit */
+    #MainMenu {visibility: hidden;}
+    header {visibility: hidden;}
+    footer {visibility: hidden;}
+    
+    /* Nền tối sang trọng */
+    .stApp {
+        background-color: #0d1117; 
+    }
+    
+    /* Khung chứa tác phẩm (Glassmorphism) */
+    .art-card {
+        background: rgba(255, 255, 255, 0.05);
+        backdrop-filter: blur(10px);
+        border-radius: 24px;
+        padding: 30px;
+        border: 2px solid rgba(255, 75, 75, 0.6);
+        box-shadow: 0 0 40px rgba(255, 75, 75, 0.3);
+        text-align: center;
+        margin-top: 20px;
+        transition: all 0.5s ease;
+    }
+    .art-image {
         border-radius: 16px;
-        padding: 10px;
-        background: #0E1117;
-        box-shadow: 0 0 30px rgba(255, 75, 75, 0.4);
+        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+        max-width: 100%;
+        height: auto;
+    }
+    .gifter-name {
+        font-size: 32px;
+        font-weight: 800;
+        color: #FF4B4B;
+        margin-top: 20px;
+        text-transform: uppercase;
+        letter-spacing: 2px;
+    }
+    .gift-text {
+        font-size: 24px;
+        color: #ffffff;
     }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🎨 TikTok Live: Sân khấu Nghệ thuật")
-st.caption("Avatar người tặng quà sẽ được 'vẽ lại' thành tranh ký họa.")
 
-
-# --- TTS với retry (sửa lỗi NoAudioReceived) ---
-async def _generate_tts_async(text: str, voice: str, max_retries: int = 3) -> bytes:
-    last_error = None
-    for attempt in range(max_retries):
-        try:
-            communicate = edge_tts.Communicate(text, voice)
-            chunks = []
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    chunks.append(chunk["data"])
-            if chunks:
-                return b"".join(chunks)
-            last_error = RuntimeError("Không nhận được audio chunk.")
-        except Exception as e:
-            last_error = e
-            if attempt < max_retries - 1:
-                await asyncio.sleep(1.5 * (attempt + 1))
-                continue
-            raise
-    raise last_error or RuntimeError("TTS thất bại sau nhiều lần thử.")
-
-
-def generate_tts_sync(text: str, voice: str) -> bytes:
-    result = {"bytes": None, "error": None}
-
-    def _runner():
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                result["bytes"] = loop.run_until_complete(_generate_tts_async(text, voice))
-            finally:
-                loop.close()
-        except Exception as e:
-            result["error"] = e
-
-    t = threading.Thread(target=_runner, daemon=True)
-    t.start()
-    t.join(timeout=45)
-
-    if t.is_alive():
-        raise TimeoutError("edge-tts quá 45 giây không phản hồi.")
-    if result["error"]:
-        raise result["error"]
-    if not result["bytes"]:
-        raise RuntimeError("edge-tts trả về dữ liệu rỗng.")
-    return result["bytes"]
-
-
-# --- Tự động phát audio qua HTML5 (không cần bấm) ---
-def play_audio_autoplay(audio_bytes: bytes) -> None:
-    """Nhúng audio dưới dạng HTML5 với unique ID → luôn autoplay khi có audio mới."""
-    if not audio_bytes:
-        return
-    try:
-        b64 = base64.b64encode(audio_bytes).decode()
-        audio_id = uuid.uuid4().hex
-        audio_html = f"""
-        <audio id="audio_{audio_id}" autoplay="autoplay" style="display:none;">
-            <source src="data:audio/mp3;base64,{b64}" type="audio/mp3">
-        </audio>
+# --- HÀM JAVASCRIPT ĐỌC TIẾNG VIỆT (0s Delay) ---
+def auto_speak(text: str):
+    """Sử dụng Web Speech API của trình duyệt để đọc ngay lập tức."""
+    # Lưu ý: Trình duyệt của khách (hoặc OBS) phải hỗ trợ tiếng Việt.
+    js_code = f"""
         <script>
-            (function() {{
-                var a = document.getElementById("audio_{audio_id}");
-                if (a) {{
-                    var p = a.play();
-                    if (p !== undefined) {{
-                        p.catch(function(e) {{ console.log("Autoplay blocked:", e); }});
-                    }}
-                }}
-            }})();
+            function speak() {{
+                var msg = new SpeechSynthesisUtterance();
+                msg.text = "{text}";
+                msg.lang = 'vi-VN';
+                msg.rate = 1.0; // Tốc độ đọc
+                msg.pitch = 1.0; // Cao độ
+                window.speechSynthesis.speak(msg);
+            }}
+            speak();
         </script>
-        """
-        components.html(audio_html, height=0, width=0)
-    except Exception as e:
-        st.error(f"Lỗi phát audio: {e}")
+    """
+    components.html(js_code, height=0, width=0)
 
 
-# --- Dialog phóng to ảnh ---
-@st.dialog("Tác phẩm từ người tặng quà", width="large")
-def show_avatar_dialog(image_bytes):
-    if image_bytes:
-        st.image(image_bytes, width="stretch")
-    else:
-        st.warning("Không có dữ liệu ảnh để hiển thị.")
-
-
-# --- Session State ---
+# --- KHỞI TẠO STATE ---
 for key, default in [
     ("data_queue", queue.Queue()),
     ("scraper", None),
-    ("events_log", []),
     ("latest_gifter", None),
-    ("audio_bytes", None),
-    ("audio_token", None),
-    ("last_audio_text", ""),
-    ("audio_unlocked", False),
+    ("last_processed_gift", ""),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
 
 
-# --- Sidebar ---
+# --- SIDEBAR ĐIỀU KHIỂN ---
 with st.sidebar:
-    st.header("⚙️ Điều khiển")
-    tiktok_username = st.text_input(
-        "Username TikTok", value="@tiktok",
-        help="Username của tài khoản đang livestream."
-    )
-
-    voice_option = st.selectbox(
-        "Giọng đọc AI",
-        options=[
-            ("vi-VN-NamMinhNeural", "Nam Minh (Nam)"),
-            ("vi-VN-HoaiMyNeural", "Hoài My (Nữ)"),
-        ],
-        format_func=lambda x: x[1], index=0
-    )
-    selected_voice = voice_option[0]
-
-    if st.button("🎤 Test giọng đọc", width="stretch"):
-        try:
-            with st.spinner("Đang tạo âm thanh test..."):
-                test_audio = generate_tts_sync(
-                    "Xin chào, đây là bài kiểm tra giọng đọc AI.", selected_voice
-                )
-            play_audio_autoplay(test_audio)
-            st.success("Đã phát âm thanh test!")
-        except Exception as e:
-            st.error(f"Lỗi: {e}")
-            traceback.print_exc(file=sys.stderr)
-
-    st.divider()
-
+    st.header("⚙️ Streamer Panel")
+    tiktok_username = st.text_input("TikTok Username", value="@tiktok")
+    
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("▶️ Bắt đầu", width="stretch"):
-            is_running = (
-                st.session_state.scraper is not None
-                and st.session_state.scraper._thread is not None
-                and st.session_state.scraper._thread.is_alive()
-            )
-            if tiktok_username and not is_running:
-                st.session_state.events_log = []
+        if st.button("▶️ Bắt đầu", use_container_width=True):
+            if tiktok_username and not (st.session_state.scraper and st.session_state.scraper._thread.is_alive()):
                 st.session_state.latest_gifter = None
-                st.session_state.audio_bytes = None
-                st.session_state.last_audio_text = ""
+                st.session_state.last_processed_gift = ""
                 new_scraper = TikTokLiveScraper(tiktok_username, st.session_state.data_queue)
                 new_scraper.start()
                 st.session_state.scraper = new_scraper
-                st.success(f"Đang lắng nghe {tiktok_username}...")
                 st.rerun()
-            elif is_running:
-                st.warning("Scraper đang chạy rồi!")
-
     with col2:
-        if st.button("⏹️ Dừng", width="stretch"):
+        if st.button("⏹️ Dừng", use_container_width=True):
             if st.session_state.scraper:
                 st.session_state.scraper.stop()
                 st.session_state.scraper = None
-                st.info("Đã dừng.")
                 st.rerun()
-
+                
     st.divider()
-    st.caption("🔊 Nhấn nút dưới MỘT LẦN để trình duyệt cho phép autoplay.")
-    if st.button("🔈 Kích hoạt Âm thanh", width="stretch"):
-        st.session_state.audio_unlocked = True
-        # Phát một âm thanh "im lặng" để mồi audio context
-        try:
-            silent = generate_tts_sync(" ", selected_voice)
-            play_audio_autoplay(silent)
-        except Exception:
-            pass
-        st.success("Đã kích hoạt!")
+    st.info("💡 **Mẹo OBS:** Thêm một 'Browser Source' trỏ đến link Streamlit này. Chỉnh kích thước 1080x1920 (dọc) hoặc 1920x1080 (ngang) để làm overlay.")
 
-    if st.session_state.audio_unlocked:
-        st.success("🔊 Âm thanh: ĐÃ MỞ KHÓA")
-    else:
-        st.warning("🔇 Âm thanh: CHƯA MỞ KHÓA")
+# --- TỰ ĐỘNG LÀM MỚI (Siêu nhanh 0.5s) ---
+st_autorefresh(interval=500, key="refresh")
 
-
-# --- Tự động làm mới ---
-st_autorefresh(interval=1500, key="tiktok_live_refresh")
-
-
-# --- Xử lý Queue ---
-def drain_queue():
+# --- XỬ LÝ HÀNG ĐỢI ---
+def process_queue():
     q = st.session_state.data_queue
     while not q.empty():
         try:
             ev = q.get_nowait()
-            st.session_state.events_log.append(ev)
-            if len(st.session_state.events_log) > 100:
-                st.session_state.events_log = st.session_state.events_log[-100:]
-
             if ev.get("type") == "gift":
+                # Cập nhật state
                 st.session_state.latest_gifter = {
                     "user": ev.get("user", "Ai đó"),
                     "sketch_bytes": ev.get("avatar_sketch_bytes"),
-                    "error": ev.get("avatar_error"),
                     "gift_name": ev.get("gift_name", "quà"),
                     "count": ev.get("count", 1),
                 }
-
-                text_to_say = (
-                    f"Cảm ơn {ev.get('user', 'bạn')} đã tặng "
-                    f"{ev.get('count', 1)} {ev.get('gift_name', 'món quà')}!"
-                )
-                if text_to_say != st.session_state.last_audio_text:
-                    try:
-                        st.session_state.audio_bytes = generate_tts_sync(
-                            text_to_say, selected_voice
-                        )
-                        st.session_state.last_audio_text = text_to_say
-                        st.session_state.audio_token = uuid.uuid4().hex
-                    except Exception as e:
-                        traceback.print_exc(file=sys.stderr)
-                        st.error(f"Lỗi tạo giọng nói: {e}")
+                
+                # Tạo câu đọc
+                text_to_say = f"Cảm ơn {ev.get('user')} đã tặng {ev.get('count')} {ev.get('gift_name')}!"
+                
+                # Chỉ đọc nếu là quà mới (tránh đọc lại liên tục khi Streamlit refresh)
+                if text_to_say != st.session_state.last_processed_gift:
+                    auto_speak(text_to_say)
+                    st.session_state.last_processed_gift = text_to_say
+                    
         except queue.Empty:
             break
 
+process_queue()
 
-drain_queue()
-
-
-# --- Trạng thái kết nối ---
-is_running = (
-    st.session_state.scraper is not None
-    and st.session_state.scraper._thread is not None
-    and st.session_state.scraper._thread.is_alive()
-)
-if is_running:
-    st.success(f"🟢 Đang kết nối: **{tiktok_username}**")
-else:
-    st.info("🔴 Chưa kết nối. Nhấn **Bắt đầu** ở sidebar.")
-
-
-# ============ BẢN CHIẾU FULL MÀN HÌNH ============
-st.subheader("🖼️ Sân khấu Nghệ thuật")
+# --- KHU VỰC HIỂN THỊ (MÁY CHIẾU) ---
 gifter = st.session_state.latest_gifter
 
-# Khung vẽ full width, tỷ lệ lớn
-with st.container():
-    if gifter and gifter.get("sketch_bytes"):
-        st.markdown('<div class="sketch-frame">', unsafe_allow_html=True)
-        st.image(gifter["sketch_bytes"], width="stretch")
-        st.markdown('</div>', unsafe_allow_html=True)
-
-        col_info, col_btn = st.columns([3, 1])
-        with col_info:
-            count = gifter.get("count", 1)
-            gift_display = f"**{gifter['gift_name']}**" + (f" (x{count})" if count > 1 else "")
-            st.success(f"🎁 Tác phẩm từ **{gifter['user']}** — đã tặng {gift_display}")
-        with col_btn:
-            if st.button("🔍 Phóng to", width="stretch"):
-                show_avatar_dialog(gifter["sketch_bytes"])
-
-        if gifter.get("error"):
-            st.warning(f"⚠️ {gifter['error']}")
-    else:
-        st.info("Tác phẩm nghệ thuật từ người tặng quà sẽ xuất hiện tại đây.")
-        if gifter and gifter.get("error"):
-            st.warning(f"⚠️ Không thể tạo tác phẩm: {gifter['error']}")
-
-
-# --- Tự động phát audio (không cần bấm) ---
-if st.session_state.audio_bytes and st.session_state.audio_token:
-    # Chỉ render player mới khi token thay đổi (mỗi lần có audio mới)
-    token_slot = st.empty()
-    with token_slot.container():
-        play_audio_autoplay(st.session_state.audio_bytes)
-    st.caption(f"🔊 Đã đọc: _{st.session_state.last_audio_text}_")
-
-
-# ============ NHẬT KÝ SỰ KIỆN ============
-with st.expander("📨 Nhật ký sự kiện gần đây", expanded=False):
-    if not st.session_state.events_log:
-        st.write("Chưa có sự kiện nào.")
-    else:
-        for ev in reversed(st.session_state.events_log[-25:]):
-            ev_type = ev.get("type")
-            if ev_type == "gift":
-                st.success(f"🎁 **{ev.get('user', 'Ai đó')}** tặng **{ev.get('gift_name', 'quà')}**")
-            elif ev_type == "comment":
-                st.chat_message("user").write(f"**{ev.get('user', 'Ai đó')}**: {ev.get('text', '')}")
-            elif ev_type == "system":
-                st.info(f"ℹ️ {ev.get('message', '')}")
+if gifter and gifter.get("sketch_bytes"):
+    # Giả lập HTML card bằng Streamlit
+    st.markdown(f"""
+    <div class="art-card">
+        <p style="color: #a0a0a0; font-size: 18px; margin-bottom: 10px;">✨ TÁC PHẨM MỚI ✨</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Chèn ảnh vào giữa
+    _, col_img, _ = st.columns([1, 3, 1]) # Căn giữa ảnh
+    with col_img:
+        st.image(gifter["sketch_bytes"], use_container_width=True)
+        
+    st.markdown(f"""
+    <div style="text-align: center; margin-top: 20px;">
+        <div class="gifter-name">{gifter['user']}</div>
+        <div class="gift-text">đã tặng <b>{gifter['count']} {gifter['gift_name']}</b></div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+else:
+    # Trạng thái chờ
+    st.markdown("""
+    <div style="text-align: center; margin-top: 100px;">
+        <h1 style="color: #333;">🎨 Đang chờ quà tặng...</h1>
+        <p style="color: #666;">Màn hình sẽ tự động cập nhật khi có người tặng quà.</p>
+    </div>
+    """, unsafe_allow_html=True)
