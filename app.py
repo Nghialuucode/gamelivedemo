@@ -1,169 +1,186 @@
 import queue
+import base64
 import streamlit as st
-import streamlit.components.v1 as components
+from gtts import gTTS
+from io import BytesIO
 from streamlit_autorefresh import st_autorefresh
 from scraper import TikTokLiveScraper
 
-# --- CẤU HÌNH TRANG ---
-st.set_page_config(page_title="Live Art Stage", page_icon="🎨", layout="wide")
+st.set_page_config(page_title="Live Art Stage", layout="wide", initial_sidebar_state="collapsed")
 
-# --- KHỞI TẠO STATE ---
+# Khởi tạo State
 for key, default in [
     ("data_queue", queue.Queue()),
     ("scraper", None),
-    ("latest_gifter", None),
-    ("last_processed_gift", ""),
-    ("is_streaming", False), # Trạng thái: Đang live hay đang setup
+    ("gifter", None),
+    ("is_streaming", False),
+    ("audio_to_play", None),
+    ("last_read_text", "")
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
 
+# CSS TOÀN CỤC
+css = """
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;800;900&display=swap');
+    
+    /* Ẩn mọi thứ của Streamlit */
+    #MainMenu, header, footer {visibility: hidden;}
+    .stApp {background-color: #0d1117;}
+    .block-container {padding: 0 !important;}
+    
+    /* Khung chứa tranh */
+    .art-container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        font-family: 'Montserrat', sans-serif;
+        background: radial-gradient(circle at center, #1a1f2e 0%, #0d1117 100%);
+        position: relative;
+        overflow: hidden;
+    }
+    
+    /* Hiệu ứng phát sáng đằng sau */
+    .glow {
+        position: absolute;
+        width: 600px;
+        height: 600px;
+        background: rgba(255, 75, 75, 0.15);
+        border-radius: 50%;
+        filter: blur(100px);
+        z-index: 0;
+        animation: pulse 4s infinite alternate;
+    }
+    
+    @keyframes pulse {
+        0% { transform: scale(0.8); opacity: 0.5; }
+        100% { transform: scale(1.2); opacity: 1; }
+    }
 
-# --- HÀM JAVASCRIPT ĐỌC TIẾNG VIỆT (0s Delay) ---
-def auto_speak(text: str):
-    js_code = f"""
-        <script>
-            function speak() {{
-                var msg = new SpeechSynthesisUtterance();
-                msg.text = "{text}";
-                msg.lang = 'vi-VN';
-                msg.rate = 1.1; 
-                window.speechSynthesis.speak(msg);
-            }}
-            speak();
-        </script>
-    """
-    components.html(js_code, height=0, width=0)
+    /* Bức ảnh */
+    .art-image {
+        width: 500px;
+        max-width: 90vw;
+        border-radius: 30px;
+        border: 4px solid rgba(255, 255, 255, 0.1);
+        box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+        z-index: 1;
+        transition: all 0.5s ease;
+    }
 
+    /* Chữ */
+    .gifter-name {
+        font-size: 48px;
+        font-weight: 900;
+        color: #fff;
+        text-transform: uppercase;
+        margin-top: 30px;
+        letter-spacing: 2px;
+        z-index: 1;
+        text-shadow: 0 0 20px rgba(255, 75, 75, 0.8);
+    }
+    .gift-text {
+        font-size: 24px;
+        font-weight: 400;
+        color: #a0a0a0;
+        margin-top: 10px;
+        z-index: 1;
+    }
+    .gift-text span { color: #FF4B4B; font-weight: 800; }
+    
+    /* Nút dừng */
+    .stop-btn-container {
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        z-index: 999;
+        opacity: 0.2;
+        transition: opacity 0.3s;
+    }
+    .stop-btn-container:hover { opacity: 1; }
+</style>
+"""
+st.markdown(css, unsafe_allow_html=True)
 
 # ==========================================
-# MÀN HÌNH 1: CÀI ĐẶT (SETUP)
+# MÀN HÌNH CÀI ĐẶT
 # ==========================================
 if not st.session_state.is_streaming:
-    st.markdown("<h1 style='text-align: center; margin-top: 50px; color: #FF4B4B;'>🎨 Thiết lập Live Art Stage</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #888;'>Nhập username TikTok để bắt đầu nhận quà và vẽ tranh.</p>", unsafe_allow_html=True)
-    
-    # Đưa form cài đặt ra giữa màn hình
+    st.markdown("<h2 style='text-align:center; margin-top:50px; color:white; font-family:Montserrat;'>🎨 THIẾT LẬP LIVE ART</h2>", unsafe_allow_html=True)
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        username = st.text_input("TikTok Username:", value="@tiktok")
-        st.write("") # Tạo khoảng trống
-        if st.button("▶️ BẮT ĐẦU LIVE", use_container_width=True, type="primary"):
+        username = st.text_input("Nhập TikTok Username:", value="@tiktok")
+        if st.button("▶️ BẮT ĐẦU LIVE", type="primary", use_container_width=True):
             if username:
-                # Khởi động scraper
                 st.session_state.scraper = TikTokLiveScraper(username, st.session_state.data_queue)
                 st.session_state.scraper.start()
                 st.session_state.is_streaming = True
-                st.session_state.latest_gifter = None
-                st.session_state.last_processed_gift = ""
+                st.session_state.gifter = None
                 st.rerun()
-                
-        st.info("💡 **Hướng dẫn OBS:** Bấm 'Bắt đầu', sau đó copy link trên thanh địa chỉ trình duyệt và dán vào Browser Source trong OBS. Khung hình sẽ tự động trong suốt.")
 
 # ==========================================
-# MÀN HÌNH 2: OBS OVERLAY (KHI ĐANG LIVE)
+# MÀN HÌNH LIVE (OVERLAY)
 # ==========================================
 else:
-    # CSS ẩn toàn bộ giao diện Streamlit, nền trong suốt
-    st.markdown("""
-    <style>
-        /* Ẩn thanh công cụ, menu, footer */
-        #MainMenu {visibility: hidden;}
-        header {visibility: hidden;}
-        footer {visibility: hidden;}
-        
-        /* Nền trong suốt để chèn lên OBS */
-        .stApp {background-color: transparent;} 
-        .block-container {padding-top: 1rem; padding-bottom: 0rem;}
-        
-        /* Nút Dừng nhỏ ở góc dưới, mờ đi để không làm hỏng stream */
-        .stop-btn {
-            position: fixed;
-            bottom: 10px;
-            right: 10px;
-            opacity: 0.1;
-            transition: opacity 0.3s;
-            z-index: 9999;
-        }
-        .stop-btn:hover { opacity: 1; }
-        
-        /* Khung viền phát sáng cho tác phẩm */
-        .art-card {
-            background: rgba(14, 17, 23, 0.7);
-            backdrop-filter: blur(10px);
-            border-radius: 24px;
-            padding: 20px;
-            border: 2px solid rgba(255, 75, 75, 0.6);
-            box-shadow: 0 0 40px rgba(255, 75, 75, 0.3);
-            text-align: center;
-        }
-        .gifter-name {
-            font-size: 36px;
-            font-weight: 900;
-            color: #FF4B4B;
-            text-transform: uppercase;
-            text-shadow: 0 0 10px rgba(255, 75, 75, 0.5);
-        }
-        .gift-text {
-            font-size: 24px;
-            color: #ffffff;
-            font-weight: bold;
-        }
-    </style>
-    """, unsafe_allow_html=True)
-
-    # Tự động làm mới siêu nhanh
     st_autorefresh(interval=500, key="refresh")
 
-    # Xử lý hàng đợi
-    q = st.session_state.data_queue
-    while not q.empty():
-        try:
-            ev = q.get_nowait()
-            if ev.get("type") == "gift":
-                st.session_state.latest_gifter = {
-                    "user": ev.get("user", "Ai đó"),
-                    "sketch_bytes": ev.get("avatar_sketch_bytes"),
-                    "gift_name": ev.get("gift_name", "quà"),
-                    "count": ev.get("count", 1),
-                }
-                
-                text_to_say = f"Cảm ơn {ev.get('user')} đã tặng {ev.get('count')} {ev.get('gift_name')}!"
-                if text_to_say != st.session_state.last_processed_gift:
-                    auto_speak(text_to_say)
-                    st.session_state.last_processed_gift = text_to_say
-        except queue.Empty:
-            break
-
-    # Hiển thị tác phẩm
-    gifter = st.session_state.latest_gifter
-    if gifter and gifter.get("sketch_bytes"):
-        # Căn giữa ảnh
-        _, col_img, _ = st.columns([1, 2, 1])
-        with col_img:
-            st.markdown('<div class="art-card">', unsafe_allow_html=True)
-            st.image(gifter["sketch_bytes"], use_container_width=True)
-            st.markdown('</div>', unsafe_allow_html=True)
+    # Xử lý sự kiện
+    while not st.session_state.data_queue.empty():
+        ev = st.session_state.data_queue.get()
+        if ev.get("type") == "gift":
+            st.session_state.gifter = ev
             
-        st.markdown(f"""
-        <div style="text-align: center; margin-top: 20px;">
-            <div class="gifter-name">{gifter['user']}</div>
-            <div class="gift-text">đã tặng <b>{gifter['count']} {gifter['gift_name']}</b></div>
+            # Tạo âm thanh bằng gTTS (Tốc độ cực nhanh)
+            text = f"Cảm ơn {ev.get('user')} đã tặng {ev.get('count')} {ev.get('gift_name')}"
+            if text != st.session_state.last_read_text:
+                try:
+                    tts = gTTS(text=text, lang='vi', slow=False)
+                    fp = BytesIO()
+                    tts.write_to_fp(fp)
+                    st.session_state.audio_to_play = fp.getvalue()
+                    st.session_state.last_read_text = text
+                except Exception as e:
+                    pass
+
+    # Hiển thị HTML
+    if st.session_state.gifter and st.session_state.gifter.get("art_bytes"):
+        b64_img = base64.b64encode(st.session_state.gifter["art_bytes"]).decode()
+        name = st.session_state.gifter.get("user")
+        count = st.session_state.gifter.get("count")
+        gift = st.session_state.gifter.get("gift_name")
+        
+        html = f"""
+        <div class="art-container">
+            <div class="glow"></div>
+            <img src="data:image/png;base64,{b64_img}" class="art-image">
+            <div class="gifter-name">{name}</div>
+            <div class="gift-text">đã tặng <span>{count} {gift}</span></div>
         </div>
-        """, unsafe_allow_html=True)
+        """
+        st.markdown(html, unsafe_allow_html=True)
     else:
         st.markdown("""
-        <div style="text-align: center; margin-top: 20vh;">
-            <h1 style="color: #333; font-size: 50px;">🎨 Đang chờ quà...</h1>
+        <div class="art-container">
+            <div class="glow"></div>
+            <h1 style="color:rgba(255,255,255,0.1); font-family:Montserrat; font-size:60px; font-weight:900;">
+                ĐANG CHỜ QUÀ...
+            </h1>
         </div>
         """, unsafe_allow_html=True)
 
-    # Nút dừng (dành cho bạn, khi đưa lên OBS nó sẽ gần như tàng hình)
-    st.markdown('<div class="stop-btn">', unsafe_allow_html=True)
+    # Phát âm thanh (st.audio ở đây sẽ chạy ngầm, không hiện UI)
+    if st.session_state.audio_to_play:
+        # Dùng CSS ẩn thẻ audio đi (nếu muốn) hoặc để nó hiện nhỏ ở góc
+        st.audio(st.session_state.audio_to_play, format="audio/mp3", autoplay=True)
+        st.session_state.audio_to_play = None # Phát xong thì xóa
+
+    # Nút dừng (làm mờ đi)
+    st.markdown('<div class="stop-btn-container">', unsafe_allow_html=True)
     if st.button("🛑 Dừng Live"):
-        if st.session_state.scraper:
-            st.session_state.scraper.stop()
         st.session_state.is_streaming = False
-        st.session_state.latest_gifter = None
+        st.session_state.gifter = None
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
