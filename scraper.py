@@ -8,8 +8,7 @@ from TikTokLive.events import GiftEvent, ConnectEvent, DisconnectEvent
 
 logger = logging.getLogger(__name__)
 
-def create_comic_art(image_bytes: bytes) -> bytes:
-    """Nâng cấp ảnh cực nét bằng thuật toán Detail Enhance (Phong cách Comic)."""
+def create_square_art(image_bytes: bytes) -> bytes:
     if not image_bytes:
         return None
     try:
@@ -18,15 +17,21 @@ def create_comic_art(image_bytes: bytes) -> bytes:
         if img is None:
             return None
 
-        # 1. Phóng to ảnh 4 lần để bù đắp độ phân giải thấp
+        # 1. Cắt ảnh thành hình vuông (Center Crop) để đưa vào bàn cờ cho đẹp
         h, w = img.shape[:2]
-        img = cv2.resize(img, (w * 4, h * 4), interpolation=cv2.INTER_LANCZOS4)
+        min_dim = min(h, w)
+        top = (h - min_dim) // 2
+        left = (w - min_dim) // 2
+        img = img[top:top+min_dim, left:left+min_dim]
 
-        # 2. Dùng Detail Enhance để làm nét các đường viền và màu sắc
-        comic_img = cv2.detailEnhance(img, sigma_s=10, sigma_r=0.15)
+        # 2. Phóng to ảnh lên 400x400 (Chống vỡ hình)
+        img = cv2.resize(img, (400, 400), interpolation=cv2.INTER_LANCZOS4)
 
-        # 3. Mã hóa lại thành PNG
-        _, buffer = cv2.imencode('.png', comic_img)
+        # 3. Dùng bộ lọc Stylization tạo hiệu ứng tranh vẽ Anime
+        art_img = cv2.stylization(img, sigma_s=60, sigma_r=0.07)
+
+        # 4. Mã hóa thành PNG
+        _, buffer = cv2.imencode('.png', art_img)
         return buffer.tobytes()
     except Exception as e:
         logger.error(f"Lỗi tạo ảnh: {e}")
@@ -59,7 +64,6 @@ class TikTokLiveScraper:
             art_bytes = None
             try:
                 best_avatar = None
-                # Ưu tiên ảnh lớn nhất có thể
                 for attr in ("avatar_large", "avatar_medium", "avatar_thumb"):
                     av = getattr(event.user, attr, None)
                     if av and getattr(av, "url_list", None):
@@ -69,17 +73,18 @@ class TikTokLiveScraper:
                 if best_avatar:
                     original_bytes = await self.client.web.fetch_image_data(image=best_avatar)
                     if original_bytes:
-                        art_bytes = create_comic_art(original_bytes)
+                        art_bytes = create_square_art(original_bytes)
             except Exception as e:
                 logger.error(e)
 
-            self.data_queue.put({
-                "type": "gift",
-                "user": user_name,
-                "gift_name": gift_name,
-                "count": count,
-                "art_bytes": art_bytes
-            })
+            if art_bytes:
+                self.data_queue.put({
+                    "type": "gift",
+                    "user": user_name,
+                    "gift_name": gift_name,
+                    "count": count,
+                    "art_bytes": art_bytes
+                })
 
         @self.client.on(DisconnectEvent)
         async def on_disconnect(event: DisconnectEvent):
