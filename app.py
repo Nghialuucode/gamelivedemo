@@ -1,119 +1,145 @@
 import queue
+import asyncio
+import tempfile
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
+import edge_tts
 from scraper import TikTokLiveScraper
 
-# --- Cấu hình trang ---
-st.set_page_config(page_title="TikTok Live Demo", page_icon="🎮", layout="wide")
-st.title("🎮 TikTok Live Interactive Demo")
-st.caption("Demo: Scraper Thread + Queue + Streamlit")
+st.set_page_config(page_title="TikTok Live Game Demo", page_icon="🎮", layout="wide")
+st.title("🎮 TikTok Live: Đọc tên & Avatar")
 
-# --- Khởi tạo Session State (chỉ chạy một lần cho mỗi phiên) ---
+# --- Khởi tạo Session State ---
 if "data_queue" not in st.session_state:
     st.session_state.data_queue = queue.Queue()
-
 if "scraper" not in st.session_state:
     st.session_state.scraper = None
-
 if "events_log" not in st.session_state:
     st.session_state.events_log = []
+if "latest_gifter" not in st.session_state:
+    st.session_state.latest_gifter = None  # Lưu {user, avatar_bytes, gift_name}
+if "audio_bytes" not in st.session_state:
+    st.session_state.audio_bytes = None
+if "last_audio_text" not in st.session_state:
+    st.session_state.last_audio_text = ""
 
-# --- Sidebar: Nhập username và điều khiển ---
+# --- Hàm tạo giọng nói bằng edge-tts ---
+async def _generate_tts(text: str) -> bytes:
+    """Tạo file âm thanh từ văn bản, trả về dữ liệu bytes."""
+    # Sử dụng giọng Nam Minh (nam) hoặc Hoài My (nữ). Ở đây chọn Nam Minh.
+    voice = "vi-VN-NamMinhNeural"
+    communicate = edge_tts.Communicate(text, voice)
+    # Ghi ra file tạm và đọc lại dưới dạng bytes
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+        tmp_path = tmp.name
+    await communicate.save(tmp_path)
+    with open(tmp_path, "rb") as f:
+        audio_bytes = f.read()
+    import os
+    os.unlink(tmp_path) # Xóa file tạm
+    return audio_bytes
+
+def generate_tts_sync(text: str) -> bytes:
+    """Wrapper đồng bộ để gọi hàm async trong Streamlit."""
+    return asyncio.run(_generate_tts(text))
+
+# --- Sidebar ---
 with st.sidebar:
-    st.header("⚙️ Cấu hình")
-    tiktok_username = st.text_input(
-        "Tên người dùng TikTok (unique_id)",
-        value="@tv_asahi_news",  # Tài khoản tin tức thường xuyên live, dùng để test
-        help="Nhập username của tài khoản đang livestream, ví dụ: @username"
-    )
+    st.header("⚙️ Điều khiển")
+    tiktok_username = st.text_input("Username TikTok", value="@tv_asahi_news")
     
     col1, col2 = st.columns(2)
     with col1:
         if st.button("▶️ Bắt đầu", use_container_width=True):
-            # Kiểm tra xem scraper cũ có đang chạy không
             is_running = (
                 st.session_state.scraper is not None 
                 and st.session_state.scraper._thread is not None 
                 and st.session_state.scraper._thread.is_alive()
             )
             if tiktok_username and not is_running:
-                # Xóa log cũ khi bắt đầu phiên mới
                 st.session_state.events_log = []
-                # Tạo và khởi chạy scraper mới
-                new_scraper = TikTokLiveScraper(
-                    unique_id=tiktok_username,
-                    data_queue=st.session_state.data_queue
-                )
+                st.session_state.latest_gifter = None
+                new_scraper = TikTokLiveScraper(tiktok_username, st.session_state.data_queue)
                 new_scraper.start()
                 st.session_state.scraper = new_scraper
-                st.success(f"Đang lắng nghe {tiktok_username}...")
                 st.rerun()
-            elif is_running:
-                st.warning("Scraper đang chạy rồi!")
-    
     with col2:
         if st.button("⏹️ Dừng", use_container_width=True):
             if st.session_state.scraper:
                 st.session_state.scraper.stop()
-                # Đặt lại scraper để có thể bắt đầu lại
                 st.session_state.scraper = None
-                st.info("Đã gửi yêu cầu dừng.")
                 st.rerun()
-
+    
     st.divider()
-    st.caption("API Key EulerStream được cấu hình qua Secrets (SIGN_API_KEY) trên Cloud.")
+    st.caption("🔊 **Quan trọng:** Hãy nhấp vào nút bên dưới một lần để 'mở khóa' âm thanh cho trình duyệt.")
+    if st.button("🔈 Kích hoạt Âm thanh", use_container_width=True):
+        st.session_state.audio_unlocked = True
+        st.success("Âm thanh đã được kích hoạt!")
 
-# --- Tự động làm mới UI mỗi 2 giây để cập nhật dữ liệu mới ---
-st_autorefresh(interval=2000, key="tiktok_live_refresh")
+# --- Tự động làm mới ---
+st_autorefresh(interval=1500, key="refresh")
 
-# --- Hàm hút dữ liệu từ Queue và cập nhật log ---
+# --- Xử lý dữ liệu từ Queue ---
 def drain_queue():
     q = st.session_state.data_queue
     while not q.empty():
         try:
-            event = q.get_nowait()
-            st.session_state.events_log.append(event)
-            # Giới hạn log để tránh phình bộ nhớ (giữ 200 sự kiện gần nhất)
-            if len(st.session_state.events_log) > 200:
-                st.session_state.events_log = st.session_state.events_log[-200:]
+            ev = q.get_nowait()
+            st.session_state.events_log.append(ev)
+            if len(st.session_state.events_log) > 100:
+                st.session_state.events_log = st.session_state.events_log[-100:]
+
+            # Nếu là quà tặng: cập nhật "bản chiếu" và tạo giọng đọc
+            if ev.get("type") == "gift":
+                st.session_state.latest_gifter = {
+                    "user": ev.get("user", "Ai đó"),
+                    "avatar_bytes": ev.get("avatar_bytes"),
+                    "gift_name": ev.get("gift_name", "quà"),
+                    "count": ev.get("count", 1)
+                }
+                # Tạo giọng đọc (chỉ tạo một lần cho mỗi sự kiện quà)
+                text_to_say = f"Cảm ơn {ev.get('user', 'bạn')} đã tặng {ev.get('count', 1)} {ev.get('gift_name', 'món quà')}!"
+                if text_to_say != st.session_state.last_audio_text:
+                    try:
+                        st.session_state.audio_bytes = generate_tts_sync(text_to_say)
+                        st.session_state.last_audio_text = text_to_say
+                    except Exception as e:
+                        st.error(f"Lỗi tạo giọng nói: {e}")
+
         except queue.Empty:
             break
 
 drain_queue()
 
-# --- Hiển thị trạng thái ---
-is_running = (
-    st.session_state.scraper is not None 
-    and st.session_state.scraper._thread is not None 
-    and st.session_state.scraper._thread.is_alive()
-)
-if is_running:
-    st.success(f"🟢 Đang kết nối và lắng nghe: **{tiktok_username}**")
-else:
-    st.info("🔴 Chưa kết nối. Nhấn **Bắt đầu** ở sidebar để bắt đầu.")
+# --- Giao diện chính ---
+col_stage, col_log = st.columns([2, 1])
 
-st.divider()
+with col_stage:
+    st.subheader("📺 Bản chiếu (Stage)")
+    gifter = st.session_state.latest_gifter
+    
+    # Khung hiển thị Avatar
+    avatar_placeholder = st.empty()
+    if gifter and gifter.get("avatar_bytes"):
+        avatar_placeholder.image(gifter["avatar_bytes"], width=200)
+    else:
+        avatar_placeholder.info("Avatar người tặng quà sẽ xuất hiện ở đây.")
+    
+    # Hiển thị tên và quà
+    if gifter:
+        st.success(f"🎁 **{gifter['user']}** vừa tặng **{gifter['gift_name']}** (x{gifter['count']})!")
+    
+    # Phát âm thanh (nếu có và đã được kích hoạt)
+    if st.session_state.get("audio_bytes"):
+        # Sử dụng autoplay=True. Lưu ý: có thể bị chặn nếu chưa tương tác.
+        st.audio(st.session_state.audio_bytes, format="audio/mp3", autoplay=True)
 
-# --- Hiển thị các sự kiện đã nhận (mới nhất ở trên) ---
-st.subheader("📨 Sự kiện nhận được")
-
-if not st.session_state.events_log:
-    st.write("Chưa có sự kiện nào. Hãy đảm bảo tài khoản đang livestream và có người tương tác.")
-else:
-    for ev in reversed(st.session_state.events_log):
-        if ev.get("type") == "comment":
-            st.chat_message("user").write(
-                f"**{ev.get('user', 'Ai đó')}** (`@{ev.get('user_id', '?')}`): {ev.get('text', '')}"
-            )
-        elif ev.get("type") == "gift":
-            count = ev.get('count', 1)
-            gift_display = f"**{ev.get('gift_name')}**" 
-            if count > 1:
-                gift_display += f" (x{count})"
-            st.success(
-                f"🎁 **{ev.get('user', 'Ai đó')}** (`@{ev.get('user_id', '?')}`) đã tặng {gift_display}!"
-            )
+with col_log:
+    st.subheader("📨 Sự kiện gần đây")
+    for ev in reversed(st.session_state.events_log[-20:]):
+        if ev.get("type") == "gift":
+            st.write(f"🎁 **{ev.get('user')}** tặng **{ev.get('gift_name')}**")
+        elif ev.get("type") == "comment":
+            st.write(f"💬 **{ev.get('user')}**: {ev.get('text')}")
         elif ev.get("type") == "system":
-            st.info(f"ℹ️ {ev.get('message', '')}")
-        else:
-            st.json(ev)
+            st.caption(f"ℹ️ {ev.get('message')}")
