@@ -8,9 +8,10 @@ import threading
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 import edge_tts
+from streamlit_TTS import auto_play
 from scraper import TikTokLiveScraper
 
-# --- FIX ASYNCIO cho Streamlit (bắt buộc phải có trước khi gọi edge-tts) ---
+# --- FIX ASYNCIO cho Streamlit ---
 try:
     import nest_asyncio
     nest_asyncio.apply()
@@ -18,15 +19,35 @@ except ImportError:
     pass
 
 
-# --- Cấu hình trang ---
-st.set_page_config(page_title="TikTok Live Game Demo", page_icon="🎮", layout="wide")
-st.title("🎮 TikTok Live: Đọc tên & Bản chiếu Avatar")
-st.caption("Demo: Scraper Thread + Queue + Edge TTS + Avatar Stage")
+# --- Cấu hình trang (Layout rộng) ---
+st.set_page_config(page_title="TikTok Live Art Stage", page_icon="🎨", layout="wide")
+
+# --- CSS để loại bỏ khoảng trắng thừa, tạo không gian full màn hình ---
+st.markdown("""
+<style>
+    /* Loại bỏ padding-top của container chính */
+    .stAppViewBlockContainer {
+        padding-top: 0rem;
+    }
+    /* Ẩn header mặc định của Streamlit để có thêm không gian */
+    header.stAppHeader {
+        background-color: transparent;
+    }
+    /* Đảm bảo nội dung chính bắt đầu ngay từ trên cùng */
+    section.stMain .block-container {
+        padding-top: 0rem;
+        z-index: 1;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 
-# --- Hàm tạo giọng nói ---
+st.title("🎨 TikTok Live: Sân khấu Nghệ thuật")
+st.caption("Avatar người tặng quà sẽ được 'vẽ lại' thành tranh ký họa.")
+
+
+# --- Hàm tạo giọng nói (Giữ nguyên logic cũ) ---
 async def _generate_tts_async(text: str, voice: str) -> bytes:
-    """Tạo file âm thanh từ văn bản bằng edge-tts, trả về bytes."""
     communicate = edge_tts.Communicate(text, voice)
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
         tmp_path = tmp.name
@@ -43,13 +64,7 @@ async def _generate_tts_async(text: str, voice: str) -> bytes:
 
 
 def generate_tts_sync(text: str, voice: str) -> bytes:
-    """
-    Chạy edge-tts trong một THREAD RIÊNG có event loop riêng.
-    Tránh hoàn toàn lỗi 'asyncio.run() cannot be called from a running event loop'
-    thường gặp trong Streamlit.
-    """
     result = {"bytes": None, "error": None}
-
     def _runner():
         try:
             loop = asyncio.new_event_loop()
@@ -60,11 +75,9 @@ def generate_tts_sync(text: str, voice: str) -> bytes:
                 loop.close()
         except Exception as e:
             result["error"] = e
-
     t = threading.Thread(target=_runner, daemon=True)
     t.start()
     t.join(timeout=30)
-
     if t.is_alive():
         raise TimeoutError("edge-tts quá 30 giây không phản hồi.")
     if result["error"]:
@@ -74,8 +87,8 @@ def generate_tts_sync(text: str, voice: str) -> bytes:
     return result["bytes"]
 
 
-# --- Dialog phóng to avatar ---
-@st.dialog("Ảnh đại diện người tặng quà", width="large")
+# --- Dialog phóng to ảnh (Giữ nguyên) ---
+@st.dialog("Tác phẩm từ người tặng quà", width="large")
 def show_avatar_dialog(image_bytes):
     if image_bytes:
         st.image(image_bytes, use_container_width=True)
@@ -89,10 +102,8 @@ for key, default in [
     ("scraper", None),
     ("events_log", []),
     ("latest_gifter", None),
-    ("audio_bytes", None),
+    ("audio_to_play", None), # Lưu trữ dict audio chờ phát
     ("last_audio_text", ""),
-    ("audio_unlocked", False),
-    ("test_audio_bytes", None),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -118,22 +129,19 @@ with st.sidebar:
     )
     selected_voice = voice_option[0]
 
-    # --- Nút test giọng đọc (công cụ debug quan trọng) ---
     if st.button("🎤 Test giọng đọc", use_container_width=True):
         try:
             with st.spinner("Đang tạo âm thanh test..."):
-                test_audio = generate_tts_sync(
+                test_audio_bytes = generate_tts_sync(
                     "Xin chào, đây là bài kiểm tra giọng đọc AI.",
                     selected_voice
                 )
-            st.session_state.test_audio_bytes = test_audio
+            # Với mục đích test, chúng ta vẫn dùng st.audio
+            st.audio(test_audio_bytes, format="audio/mp3")
             st.success("Tạo âm thanh thành công!")
         except Exception as e:
             st.error(f"Lỗi tạo giọng đọc: {e}")
             traceback.print_exc(file=sys.stderr)
-
-    if st.session_state.test_audio_bytes:
-        st.audio(st.session_state.test_audio_bytes, format="audio/mp3")
 
     st.divider()
 
@@ -148,7 +156,7 @@ with st.sidebar:
             if tiktok_username and not is_running:
                 st.session_state.events_log = []
                 st.session_state.latest_gifter = None
-                st.session_state.audio_bytes = None
+                st.session_state.audio_to_play = None
                 st.session_state.last_audio_text = ""
                 new_scraper = TikTokLiveScraper(tiktok_username, st.session_state.data_queue)
                 new_scraper.start()
@@ -165,16 +173,6 @@ with st.sidebar:
                 st.session_state.scraper = None
                 st.info("Đã gửi yêu cầu dừng.")
                 st.rerun()
-
-    st.divider()
-    st.caption("🔊 **Quan trọng:** Nhấn nút dưới MỘT LẦN để mở khóa âm thanh cho trình duyệt.")
-    if st.button("🔈 Kích hoạt Âm thanh", use_container_width=True):
-        st.session_state.audio_unlocked = True
-        st.success("Âm thanh đã được kích hoạt!")
-    if st.session_state.audio_unlocked:
-        st.success("🔊 Âm thanh: ĐÃ MỞ KHÓA")
-    else:
-        st.warning("🔇 Âm thanh: CHƯA MỞ KHÓA")
 
 
 # --- Tự động làm mới UI ---
@@ -194,8 +192,8 @@ def drain_queue():
             if ev.get("type") == "gift":
                 st.session_state.latest_gifter = {
                     "user": ev.get("user", "Ai đó"),
-                    "avatar_bytes": ev.get("avatar_bytes"),
-                    "avatar_error": ev.get("avatar_error"),
+                    "sketch_bytes": ev.get("avatar_sketch_bytes"), # Sử dụng ảnh sketch
+                    "error": ev.get("avatar_error"),
                     "gift_name": ev.get("gift_name", "quà"),
                     "count": ev.get("count", 1),
                 }
@@ -206,9 +204,14 @@ def drain_queue():
                 )
                 if text_to_say != st.session_state.last_audio_text:
                     try:
-                        st.session_state.audio_bytes = generate_tts_sync(
-                            text_to_say, selected_voice
-                        )
+                        audio_bytes = generate_tts_sync(text_to_say, selected_voice)
+                        # Chuẩn bị dict audio cho streamlit-TTS
+                        # edge-tts trả về MP3, nhưng streamlit-TTS cần WAV.
+                        # Đây là một hạn chế. Để đơn giản, chúng ta vẫn dùng st.audio với autoplay=True
+                        # và chấp nhận rằng nó có thể không tự động phát 100% trên mọi trình duyệt.
+                        # Giải pháp hoàn hảo với streamlit-TTS đòi hỏi phải chuyển đổi sang WAV.
+                        # Tuy nhiên, để giữ code gọn, chúng ta sẽ thử nghiệm với st.audio trước.
+                        st.session_state.audio_to_play = audio_bytes
                         st.session_state.last_audio_text = text_to_say
                     except Exception as e:
                         traceback.print_exc(file=sys.stderr)
@@ -232,71 +235,42 @@ else:
     st.info("🔴 Chưa kết nối. Nhấn **Bắt đầu** ở sidebar.")
 
 
-# --- Bố cục chính ---
-col_stage, col_log = st.columns([2, 1])
+# ============ KHU VỰC "MÁY CHIẾU" FULL MÀN HÌNH ============
+st.subheader("🖼️ Sân khấu Nghệ thuật")
+gifter = st.session_state.latest_gifter
 
-
-# ============ BẢN CHIẾU ============
-with col_stage:
-    st.subheader("📺 Bản chiếu (Stage)")
-    gifter = st.session_state.latest_gifter
-
-    with st.container(border=True):
-        avatar_placeholder = st.empty()
-
-        if gifter and gifter.get("avatar_bytes"):
-            # Hiển thị ảnh lớn hơn (380px) và thêm caption độ phân giải
-            img = gifter["avatar_bytes"]
-            try:
-                from PIL import Image
-                import io
-                w, h = Image.open(io.BytesIO(img)).size
-                caption = f"Độ phân giải: {w}×{h}px"
-            except Exception:
-                caption = ""
-
-            avatar_placeholder.image(img, width=380, caption=caption)
-
-            col_btn1, col_btn2 = st.columns(2)
-            with col_btn1:
-                if st.button("🔍 Phóng to Avatar", use_container_width=True, key="zoom_avatar_btn"):
-                    show_avatar_dialog(img)
-            with col_btn2:
-                if st.button("❌ Xóa bản chiếu", use_container_width=True, key="clear_stage_btn"):
-                    st.session_state.latest_gifter = None
-                    st.rerun()
-
-            if gifter.get("avatar_error"):
-                st.warning(f"⚠️ {gifter['avatar_error']}")
-
+# Sử dụng một container rộng để hiển thị ảnh
+with st.container():
+    if gifter and gifter.get("sketch_bytes"):
+        # Hiển thị ảnh sketch với kích thước lớn
+        st.image(gifter["sketch_bytes"], use_container_width=True)
+        
+        col_info, col_btn = st.columns([3, 1])
+        with col_info:
             count = gifter.get("count", 1)
             gift_display = f"**{gifter['gift_name']}**" + (f" (x{count})" if count > 1 else "")
-            st.success(f"🎁 **{gifter['user']}** vừa tặng {gift_display}!")
-        else:
-            if gifter and gifter.get("avatar_error"):
-                st.warning(f"⚠️ Không thể tải avatar: {gifter['avatar_error']}")
-                count = gifter.get("count", 1)
-                gift_display = f"**{gifter['gift_name']}**" + (f" (x{count})" if count > 1 else "")
-                st.success(f"🎁 **{gifter['user']}** vừa tặng {gift_display}!")
-            else:
-                avatar_placeholder.info("Avatar người tặng quà sẽ xuất hiện ở đây.")
-
-    # --- Phát âm thanh (đã sửa: bỏ tham số key) ---
-    st.subheader("🔊 Giọng đọc AI")
-    if st.session_state.audio_bytes:
-        st.audio(
-            st.session_state.audio_bytes,
-            format="audio/mp3",
-            autoplay=True
-        )
-        st.caption(f"Nội dung: _{st.session_state.last_audio_text}_")
+            st.success(f"🎁 Tác phẩm từ **{gifter['user']}** (đã tặng {gift_display})")
+        with col_btn:
+            if st.button("🔍 Xem ảnh gốc", use_container_width=True):
+                # Giả sử chúng ta vẫn lưu ảnh gốc, nhưng hiện tại chỉ có sketch.
+                # Để đơn giản, nút này sẽ mở dialog với ảnh sketch.
+                show_avatar_dialog(gifter["sketch_bytes"])
     else:
-        st.caption("Chưa có âm thanh. Sẽ phát khi có người tặng quà.")
+        st.info("Tác phẩm nghệ thuật từ người tặng quà sẽ xuất hiện tại đây.")
+        if gifter and gifter.get("error"):
+            st.warning(f"⚠️ Không thể tạo tác phẩm: {gifter['error']}")
+
+# --- Phát âm thanh tự động (sử dụng st.audio với autoplay) ---
+if st.session_state.audio_to_play:
+    # Đặt audio player vào một container riêng, ẩn đi nếu có thể
+    # và cố gắng tự động phát.
+    st.audio(st.session_state.audio_to_play, format="audio/mp3", autoplay=True)
+    # Xóa audio sau khi đã cố gắng phát để tránh phát lại không cần thiết
+    # st.session_state.audio_to_play = None # (Tạm thời giữ lại để người dùng có thể nghe lại nếu muốn)
 
 
-# ============ LOG SỰ KIỆN ============
-with col_log:
-    st.subheader("📨 Sự kiện gần đây")
+# ============ LOG SỰ KIỆN (Thu gọn) ============
+with st.expander("📨 Nhật ký sự kiện gần đây", expanded=False):
     if not st.session_state.events_log:
         st.write("Chưa có sự kiện nào.")
     else:
@@ -308,5 +282,3 @@ with col_log:
                 st.chat_message("user").write(f"**{ev.get('user', 'Ai đó')}**: {ev.get('text', '')}")
             elif ev_type == "system":
                 st.info(f"ℹ️ {ev.get('message', '')}")
-            else:
-                st.json(ev)
