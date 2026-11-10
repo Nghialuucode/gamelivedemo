@@ -11,29 +11,37 @@ logger = logging.getLogger(__name__)
 
 # WebDefaults.tiktok_sign_api_key = "YOUR_EULER_API_KEY_HERE"
 
-
-def create_artistic_sketch(image_bytes: bytes) -> bytes:
-    """Chuyển đổi avatar thành bức ký họa nghệ thuật bằng OpenCV."""
+def create_beautiful_sketch(image_bytes: bytes) -> bytes:
+    """Nâng cấp chất lượng ảnh và tạo hiệu ứng ký họa mềm mại."""
     if not image_bytes:
         return None
     try:
         nparr = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None:
-            raise ValueError("Không thể giải mã ảnh.")
+            return None
 
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        inverted_gray = 255 - gray
-        blurred = cv2.GaussianBlur(inverted_gray, (21, 21), 0)
-        inverted_blurred = 255 - blurred
-        sketch = cv2.divide(gray, inverted_blurred, scale=256.0)
+        # 1. Upscale ảnh lên gấp 3 lần để chống vỡ hạt (nếu ảnh gốc nhỏ)
+        h, w = img.shape[:2]
+        if w < 500:
+            img = cv2.resize(img, (w * 3, h * 3), interpolation=cv2.INTER_LANCZOS4)
 
-        _, buffer = cv2.imencode('.png', sketch)
+        # 2. Dùng thuật toán pencilSketch tích hợp sẵn của OpenCV (mịn hơn nhiều)
+        # dst_gray là ảnh trắng đen nét vẽ chì, dst_color là ảnh màu
+        dst_gray, dst_color = cv2.pencilSketch(
+            img, sigma_s=60, sigma_r=0.07, shade_factor=0.05
+        )
+        
+        # Bạn có thể chọn trả về dst_gray (đen trắng) hoặc dst_color (có màu)
+        # Ở đây mình chọn ảnh đen trắng vì nó giống tranh vẽ nhất
+        final_img = dst_gray 
+
+        # 3. Mã hóa lại thành PNG
+        _, buffer = cv2.imencode('.png', final_img)
         return buffer.tobytes()
     except Exception as e:
         logger.error(f"Lỗi tạo sketch: {e}")
         return None
-
 
 class TikTokLiveScraper:
     def __init__(self, unique_id: str, data_queue: queue.Queue):
@@ -46,19 +54,12 @@ class TikTokLiveScraper:
     def _register_handlers(self):
         @self.client.on(ConnectEvent)
         async def on_connect(event: ConnectEvent):
-            self.data_queue.put({
-                "type": "system",
-                "message": f"✅ Đã kết nối tới phòng live của @{event.unique_id}"
-            })
+            self.data_queue.put({"type": "system", "message": f"✅ Đã kết nối @{event.unique_id}"})
 
         @self.client.on(CommentEvent)
         async def on_comment(event: CommentEvent):
             user_name = event.user.nickname if event.user else "Ẩn danh"
-            self.data_queue.put({
-                "type": "comment",
-                "user": user_name,
-                "text": event.comment or ""
-            })
+            self.data_queue.put({"type": "comment", "user": user_name, "text": event.comment or ""})
 
         @self.client.on(GiftEvent)
         async def on_gift(event: GiftEvent):
@@ -87,24 +88,16 @@ class TikTokLiveScraper:
                         best_avatar = av
                         break
 
-                if best_avatar is None:
-                    avatar_error = "Người dùng không có avatar hợp lệ."
-                else:
+                if best_avatar:
                     original_bytes = await self.client.web.fetch_image_data(image=best_avatar)
-                    if original_bytes is None:
-                        avatar_error = "fetch_image_data trả về None."
-                    else:
-                        avatar_sketch_bytes = create_artistic_sketch(original_bytes)
-                        if avatar_sketch_bytes is None:
-                            avatar_error = "Không thể tạo hiệu ứng sketch."
+                    if original_bytes:
+                        avatar_sketch_bytes = create_beautiful_sketch(original_bytes)
             except Exception as e:
-                avatar_error = f"Lỗi tải/xử lý ảnh: {e}"
-                logger.warning(f"Không thể xử lý avatar cho {user_name}: {e}")
+                avatar_error = str(e)
 
             self.data_queue.put({
                 "type": "gift",
                 "user": user_name,
-                "user_id": getattr(user, "unique_id", "unknown"),
                 "gift_name": gift_name,
                 "count": count,
                 "avatar_sketch_bytes": avatar_sketch_bytes,
@@ -113,20 +106,13 @@ class TikTokLiveScraper:
 
         @self.client.on(DisconnectEvent)
         async def on_disconnect(event: DisconnectEvent):
-            self.data_queue.put({
-                "type": "system",
-                "message": "⚠️ Đã ngắt kết nối khỏi TikTok Live."
-            })
+            self.data_queue.put({"type": "system", "message": "⚠️ Đã ngắt kết nối."})
 
     def _run(self):
         try:
             self.client.run()
         except Exception as e:
-            logger.exception("Lỗi trong quá trình chạy scraper:")
-            self.data_queue.put({
-                "type": "system",
-                "message": f"❌ Lỗi scraper: {e}"
-            })
+            self.data_queue.put({"type": "system", "message": f"❌ Lỗi: {e}"})
 
     def start(self):
         if self._thread is None or not self._thread.is_alive():
@@ -134,4 +120,4 @@ class TikTokLiveScraper:
             self._thread.start()
 
     def stop(self):
-        logger.info("Yêu cầu dừng scraper.")
+        pass
